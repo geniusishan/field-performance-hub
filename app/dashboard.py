@@ -73,10 +73,10 @@ with tab_overview:
                  text=m["score"].map("{:.0%}".format), title="Weighted scorecard by market")
     fig.add_hline(y=1.0, line_dash="dash", line_color="grey")
     fig.update_layout(yaxis_tickformat=".0%", xaxis_title=None, yaxis_title=None)
-    left.plotly_chart(fig, use_container_width=True)
+    left.plotly_chart(fig, width="stretch")
     mm = q(f"SELECT month, SUM(signings) AS signings FROM marts.market_monthly "
            f"WHERE market_name IN {mfilter} GROUP BY 1 ORDER BY 1")
-    right.plotly_chart(px.line(mm, x="month", y="signings", title="Monthly signings"), use_container_width=True)
+    right.plotly_chart(px.line(mm, x="month", y="signings", title="Monthly signings"), width="stretch")
     st.subheader("Headline insights")
     st.markdown(Path(EXPORT_DIR / "insights.md").read_text().split("\n", 2)[-1])
 
@@ -89,14 +89,14 @@ with tab_score:
     name_cols = ["market_name", "territory_name"] + (["rep_name", "role"] if tbl == "rep" else [])
     show = df[name_cols + ["signings", "target_signings", "att_signings", "att_new_volume",
                            "activation_rate", "mid_large_mix", "score", "tier", "biggest_gap"]]
-    st.dataframe(show, use_container_width=True, hide_index=True, column_config={
+    st.dataframe(show, width="stretch", hide_index=True, column_config={
         c: st.column_config.ProgressColumn(c, format="percent", min_value=0, max_value=1.5)
         for c in ["att_signings", "att_new_volume", "score"]
     } | {"target_signings": st.column_config.NumberColumn(format="%.0f"),
          "activation_rate": st.column_config.NumberColumn(format="percent"),
          "mid_large_mix": st.column_config.NumberColumn(format="percent")})
     st.plotly_chart(px.histogram(df, x="score", color="tier", color_discrete_map=TIER_COLORS, nbins=30,
-                                 title=f"{level} score distribution"), use_container_width=True)
+                                 title=f"{level} score distribution"), width="stretch")
 
 with tab_fc:
     mk = st.selectbox("Market", sel or markets)
@@ -110,7 +110,7 @@ with tab_fc:
     fig.add_trace(go.Scatter(x=fc["month"], y=fc["forecast"], name=f"Forecast ({fc['model'].iloc[0]})",
                              line=dict(color="#1F3A5F", dash="dash")))
     fig.update_layout(title=f"{mk}: monthly signings, actual and forecast")
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
     st.caption("Model chosen per market by rolling-origin back-test (lowest WAPE). Interval from the model's own back-test errors.")
     st.dataframe(q(f"SELECT model, mean_wape, selected FROM forecast.model_selection WHERE market_name = '{mk}' ORDER BY mean_wape"),
                  hide_index=True, column_config={"mean_wape": st.column_config.NumberColumn(format="percent")})
@@ -125,9 +125,9 @@ with tab_targets:
                    var_name="component", value_name="share")
     st.plotly_chart(px.bar(long, x="territory_name", y="share", color="component", barmode="group",
                            title="How each territory's share was built").update_layout(yaxis_tickformat=".0%"),
-                    use_container_width=True)
+                    width="stretch")
     st.dataframe(tp[["market_name", "territory_name", "prior_12m_signings", "annual_target", "change_vs_prior_pct"]],
-                 hide_index=True, use_container_width=True,
+                 hide_index=True, width="stretch",
                  column_config={"annual_target": st.column_config.NumberColumn(format="%.0f"),
                                 "change_vs_prior_pct": st.column_config.NumberColumn(format="percent")})
 
@@ -137,9 +137,9 @@ with tab_dq:
     c[0].metric("Checks", len(dqr))
     c[1].metric("Critical failures", int(((dqr["severity"] == "CRITICAL") & ~dqr["passed"]).sum()))
     c[2].metric("Rows quarantined", f"{int(dqr.loc[(dqr['category']=='Validity') & (dqr['severity']=='WARNING'), 'failing_rows'].sum()):,}")
-    st.dataframe(dqr, hide_index=True, use_container_width=True)
+    st.dataframe(dqr, hide_index=True, width="stretch")
     qm = q("SELECT 'merchants' AS source, dq_issue, COUNT(*) AS n FROM dq.quarantine_merchants GROUP BY 1,2 "
            "UNION ALL SELECT 'merchant_volume', dq_issue, COUNT(*) FROM dq.quarantine_volume GROUP BY 1,2")
     st.plotly_chart(px.bar(qm, x="n", y="dq_issue", color="source", orientation="h", title="Quarantined rows by reason code"),
-                    use_container_width=True)
+                    width="stretch")
     st.caption("Every quarantined row is kept with its reason code in dq.quarantine_* for remediation by the source owner.")
