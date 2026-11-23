@@ -1,0 +1,47 @@
+# Field Performance Hub — business rules live here, not in code.
+# Change a weight or a threshold, re-run `python -m fph.pipeline run`, and every
+# scorecard, target and export is regenerated consistently.
+
+data:
+  seed: 42
+  start_month: "2023-01-01"
+  end_month: "2026-10-01"        # last fully closed month
+  inject_dq_issues: true         # simulate real-world source-system defects
+
+warehouse:
+  path: "data/warehouse.duckdb"
+
+targets:
+  stretch_factor: 0.05           # plan = forecast x (1 + stretch)
+  allocation_weights:            # how a market plan is split across territories
+    historical_share: 0.5        # what the territory delivered in the last 12 months
+    whitespace_share: 0.3        # unsigned merchants still available (market potential)
+    capacity_share: 0.2          # ramp-adjusted rep headcount
+  max_change_vs_prior: 0.25      # a territory's share of its market plan moves at most +/-25% vs last year
+  rep_ramp:                      # productivity factor by tenure (months)
+    - {max_tenure_months: 6,  factor: 0.5}
+    - {max_tenure_months: 12, factor: 0.75}
+    - {max_tenure_months: 9999, factor: 1.0}
+
+scorecard:
+  attainment_cap: 1.5
+  kpis:
+    signings:        {weight: 0.40, label: "New merchant signings vs target"}
+    new_volume:      {weight: 0.30, label: "New-merchant charge volume vs target"}
+    activation_90d:  {weight: 0.20, label: "90-day activation rate vs goal", goal: 0.75}
+    quality_mix:     {weight: 0.10, label: "Mid/Large merchant mix vs goal", goal: 0.28}
+  tiers:
+    - {min_score: 1.10, tier: "Exceeds"}
+    - {min_score: 0.95, tier: "Meets"}
+    - {min_score: 0.80, tier: "Below"}
+    - {min_score: 0.00, tier: "Needs Attention"}
+
+forecast:
+  horizon_months: 14             # covers the rest of this year and the full plan year
+  backtest_origins: 4
+  backtest_horizon: 3
+  interval_level: 0.8
+
+data_quality:
+  fail_pipeline_on_critical: true
+  max_quarantine_rate: 0.02      # >2% rows quarantined = critical failure
