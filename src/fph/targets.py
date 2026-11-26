@@ -8,13 +8,17 @@
    with a guard-rail: a territory's share of the market plan moves at most +/-max_change
    (relative) vs its share of last year's actuals, so no territory gets a shock re-allocation.
 3. Monthly phasing follows the market's forecast seasonality.
-4. Rep targets split each territory-month by ramp-adjusted capacity, so a new hire
-   carries 50% of a tenured rep's target, rising to 100% after a year.
+4. Rep targets split each territory-month across the reps actually employed that month, by
+   ramp- and role-adjusted capacity: a new hire carries 50% of a tenured rep's target, rising
+   to 100% after a year; Account Development reps carry a smaller new-signings share; a
+   leaver's share moves to the rest of the team.
 5. New-merchant volume target = historical "volume per YTD signing" curve x cumulative
    signings target, so volume and signings targets are consistent with each other.
 
 Every component is stored in targets.territory_plan, so any target can be explained
-line by line to a sales leader.
+line by line to a sales leader. targets.territory_monthly keeps the planned headcount and
+ramp-adjusted capacity behind each territory-month, which the driver analysis compares
+against what actually happened.
 """
 from __future__ import annotations
 
@@ -90,11 +94,15 @@ def set_targets(con: duckdb.DuckDBPyConnection, plan_year: int, as_of_month: str
     terr["prior_12m_signings"] = terr["territory_id"].map(hist12).fillna(0)
     terr["whitespace"] = (terr["merchant_universe"] - terr["territory_id"].map(signed_to_date).fillna(0)).clip(lower=0)
 
-    reps = con.execute("SELECT rep_id, territory_id, hire_date FROM marts.dim_rep").df()
+    reps = con.execute("SELECT rep_id, territory_id, role, hire_date, termination_date FROM marts.dim_rep").df()
+    reps["role_weight"] = reps["role"].map(tcfg["role_weight"]).fillna(1.0)
     reps["hire_date"] = pd.to_datetime(reps["hire_date"])
-    reps_now = reps[reps["hire_date"] <= as_of].copy()
+    reps["termination_date"] = pd.to_datetime(reps["termination_date"])
+    # the plan only knows the team employed when it is set (no future hires or exits)
+    reps_now = reps[(reps["hire_date"] <= as_of + pd.offsets.MonthEnd(0))
+                    & (reps["termination_date"].isna() | (reps["termination_date"] > as_of + pd.offsets.MonthEnd(0)))].copy()
     reps_now["ramp"] = _ramp_factor(((plan_months[0] - reps_now["hire_date"]).dt.days / 30.44).to_numpy(),
-                                    tcfg["rep_ramp"])
+                                    tcfg["rep_ramp"]) * reps_now["role_weight"]
     terr["capacity"] = terr["territory_id"].map(reps_now.groupby("territory_id")["ramp"].sum()).fillna(0)
 
     aw = tcfg["allocation_weights"]
@@ -116,9 +124,10 @@ def set_targets(con: duckdb.DuckDBPyConnection, plan_year: int, as_of_month: str
 
     # 4. rep-month split by ramp-adjusted capacity --------------------------------
     rep_month = reps.merge(pd.DataFrame({"month": plan_months}), how="cross")
-    rep_month = rep_month[rep_month["hire_date"] <= rep_month["month"] + pd.offsets.MonthEnd(0)]
+    rep_month = rep_month[(rep_month["hire_date"] <= rep_month["month"] + pd.offsets.MonthEnd(0))
+                          & (rep_month["termination_date"].isna() | (rep_month["termination_date"] >= rep_month["month"]))]
     rep_month["ramp"] = _ramp_factor(((rep_month["month"] - rep_month["hire_date"]).dt.days / 30.44).to_numpy(),
-                                     tcfg["rep_ramp"])
+                                     tcfg["rep_ramp"]) * rep_month["role_weight"]
     rep_month["cap_share"] = rep_month["ramp"] / rep_month.groupby(["territory_id", "month"])["ramp"].transform("sum")
     rt = rep_month.merge(tm[["territory_id", "market_id", "month", "territory_target"]], on=["territory_id", "month"])
     rt["target_signings"] = rt["territory_target"] * rt["cap_share"]
@@ -140,6 +149,37 @@ def set_targets(con: duckdb.DuckDBPyConnection, plan_year: int, as_of_month: str
     rt["target_new_volume_usd"] = rt["cum_target"] * rt["vol_per_ytd_signing"].fillna(0)
 
     out = rt[["month", "rep_id", "territory_id", "market_id", "ramp", "target_signings", "target_new_volume_usd"]].copy()
+
+    # 6. headcount plan per territory-month: the team employed when the plan is set, ramping
+    #    forward, plus planned net hiring at the pace of the last 12 months (new hires enter
+    #    evenly through the year and ramp up). The driver analysis compares this with reality.
+    cap = reps_now[["rep_id", "territory_id", "hire_date", "role_weight"]].merge(pd.DataFrame({"month": plan_months}), how="cross")
+    cap["ramp"] = _ramp_factor(((cap["month"] - cap["hire_date"]).dt.days / 30.44).to_numpy(), tcfg["rep_ramp"]) * cap["role_weight"]
+    cap_plan = (cap.groupby(["territory_id", "month"])
+                .agg(planned_rep_months=("rep_id", "count"), planned_capacity=("ramp", "sum")).reset_index())
+    year_ago = as_of - pd.DateOffset(months=12)
+    active_then = reps[(reps["hire_date"] <= year_ago + pd.offsets.MonthEnd(0))
+                       & (reps["termination_date"].isna() | (reps["termination_date"] > year_ago + pd.offsets.MonthEnd(0)))]
+    net_adds = (reps_now.groupby("territory_id").size()
+                .sub(active_then.groupby("territory_id").size(), fill_value=0).clip(lower=0))
+    avg_weight = reps_now.groupby("territory_id")["role_weight"].mean()
+    hires = []
+    for terr_id, adds in net_adds.items():
+        for k, m in enumerate(plan_months):          # k+1 months of planned hires so far
+            per_month = adds / 12
+            tenures = np.arange(k, -1, -1) * 1.0     # hire made j months ago
+            hires.append({"territory_id": terr_id, "month": m, "hire_rep_months": per_month * (k + 1),
+                          "hire_capacity": per_month * _ramp_factor(tenures, tcfg["rep_ramp"]).sum()
+                          * avg_weight.get(terr_id, 1.0)})
+    hires = pd.DataFrame(hires)
+    if not hires.empty:
+        cap_plan = cap_plan.merge(hires, on=["territory_id", "month"], how="outer").fillna(0)
+        cap_plan["planned_rep_months"] += cap_plan.pop("hire_rep_months")
+        cap_plan["planned_capacity"] += cap_plan.pop("hire_capacity")
+    tmonth = tm[["territory_id", "market_id", "month", "territory_target"]].merge(cap_plan, on=["territory_id", "month"], how="left")
+    tmonth = tmonth.fillna({"planned_rep_months": 0, "planned_capacity": 0.0})
+    tmonth.insert(0, "plan_year", plan_year)
+    tmonth["month"] = tmonth["month"].dt.date
     out.insert(0, "plan_year", plan_year)
     out["month"] = out["month"].dt.date
     terr_plan = terr.assign(plan_year=plan_year, as_of_month=as_of.date(),
@@ -147,7 +187,7 @@ def set_targets(con: duckdb.DuckDBPyConnection, plan_year: int, as_of_month: str
     terr_plan["change_vs_prior_pct"] = terr_plan["annual_target"] / terr_plan["prior_12m_signings"].replace(0, np.nan) - 1
 
     con.execute("CREATE SCHEMA IF NOT EXISTS targets")
-    for name, df in (("rep_monthly", out), ("territory_plan", terr_plan)):
+    for name, df in (("rep_monthly", out), ("territory_plan", terr_plan), ("territory_monthly", tmonth)):
         exists = con.execute(
             "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='targets' AND table_name=?", [name]
         ).fetchone()[0]

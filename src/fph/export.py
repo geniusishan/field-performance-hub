@@ -102,6 +102,13 @@ def insights(con: duckdb.DuckDBPyConnection) -> list[str]:
     watch = t.head(3)
     lines.append("Territories needing attention: " + "; ".join(
         f"{x.territory_name} ({x.score:.0%}, {x.biggest_gap})" for x in watch.itertuples()) + ".")
+    gd = con.execute("SELECT * FROM insights.gap_drivers WHERE level = 'market' ORDER BY gap").df()
+    if len(gd):
+        w = gd.iloc[0]
+        effects = {"headcount": w["headcount_effect"], "ramp & role mix": w["ramp_effect"], "productivity": w["productivity_effect"]}
+        lines.append(f"Largest gap to target: {w['market_name']} ({w['gap']:+,.0f} signings), driven mainly by "
+                     f"{w['main_driver'].lower()} (headcount {effects['headcount']:+,.0f}, ramp & role mix "
+                     f"{effects['ramp & role mix']:+,.0f}, productivity {effects['productivity']:+,.0f}).")
     gap_counts = r.loc[r["tier"].isin(["Below", "Needs Attention"]), "biggest_gap"].value_counts()
     if len(gap_counts):
         lines.append(f"Most common gap among under-performing reps: {gap_counts.index[0]} ({gap_counts.iloc[0]} reps).")
@@ -142,6 +149,12 @@ def publish(con: duckdb.DuckDBPyConnection, plan_year: int, next_plan_year: int)
     _write_plain(wb, f"{next_plan_year} Targets", plan,
                  {c: "0.0%" for c in ["historical_share", "whitespace_share", "capacity_share", "blended_share",
                                       "final_share", "change_vs_prior_pct"]} | {"annual_target": "#,##0"})
+    _write_plain(wb, "Gap Drivers", con.execute(
+        "SELECT level, market_name, territory_name, actual, ROUND(target, 1) AS target, ROUND(gap, 1) AS gap, gap_pct, "
+        "ROUND(headcount_effect, 1) AS headcount_effect, ROUND(ramp_effect, 1) AS ramp_effect, "
+        "ROUND(productivity_effect, 1) AS productivity_effect, main_driver, ROUND(avg_reps_actual, 1) AS avg_reps_actual, "
+        "ROUND(avg_reps_plan, 1) AS avg_reps_plan FROM insights.gap_drivers ORDER BY level, gap").df(),
+        {"gap_pct": "0.0%"})
     _write_plain(wb, "Forecast Models", con.execute(
         "SELECT market_name, model, mean_wape, selected FROM forecast.model_selection ORDER BY market_name, mean_wape").df(),
         {"mean_wape": "0.0%"})

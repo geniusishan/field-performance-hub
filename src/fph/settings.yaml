@@ -12,12 +12,15 @@ warehouse:
   path: "data/warehouse.duckdb"
 
 targets:
-  stretch_factor: 0.05           # plan = forecast x (1 + stretch)
+  stretch_factor: 0.02           # plan = bias-corrected forecast x (1 + stretch)
   allocation_weights:            # how a market plan is split across territories
     historical_share: 0.5        # what the territory delivered in the last 12 months
     whitespace_share: 0.3        # unsigned merchants still available (market potential)
     capacity_share: 0.2          # ramp-adjusted rep headcount
   max_change_vs_prior: 0.25      # a territory's share of its market plan moves at most +/-25% vs last year
+  role_weight:                   # new-signing capacity by role (Account Development reps
+    Acquisition: 1.0             # mostly grow existing merchants, so they carry a smaller
+    Account Development: 0.45    # share of the new-signings target)
   rep_ramp:                      # productivity factor by tenure (months)
     - {max_tenure_months: 6,  factor: 0.5}
     - {max_tenure_months: 12, factor: 0.75}

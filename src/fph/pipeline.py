@@ -1,6 +1,7 @@
 """One command runs the full monthly close:
 
-    generate/ingest -> SQL models -> data-quality gate -> forecast -> targets -> scorecards -> publish
+    generate/ingest -> SQL models -> data-quality gate -> forecast -> targets -> scorecards
+    -> gap drivers -> publish
 
     python -m fph.pipeline run                      # as of the month in settings.yaml
     python -m fph.pipeline run --as-of 2026-06-01   # rebuild any historical month
@@ -20,7 +21,7 @@ from datetime import datetime
 
 import pandas as pd
 
-from fph import dq, export, forecast, generate, scorecard, targets, warehouse
+from fph import dq, drivers, export, forecast, generate, scorecard, targets, warehouse
 from fph.config import EXPORT_DIR, settings
 
 
@@ -69,7 +70,9 @@ def run(as_of: str | None = None, skip_generate: bool = False, verbose: bool = T
 
         sc = scorecard.build(con, plan_year, str(as_of.date()))
         manifest["scorecard"] = {"reps": len(sc["rep"]), "tier_mix": sc["rep"]["tier"].value_counts().to_dict()}
-        log(f"[6/7] scorecards built for {len(sc['rep'])} reps")
+        gd = drivers.publish(con, plan_year, str(as_of.date()))
+        manifest["gap_drivers"] = gd[gd["level"] == "market"].set_index("market_name")["main_driver"].to_dict()
+        log(f"[6/7] scorecards built for {len(sc['rep'])} reps; gap drivers explained for {len(gd)} markets/territories")
 
         out = export.publish(con, plan_year, plan_year + 1)
         manifest["outputs"] = {k: str(v) for k, v in out.items()}

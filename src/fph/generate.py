@@ -97,10 +97,35 @@ def generate(seed: int | None = None, inject_issues: bool | None = None) -> Data
     reps = pd.DataFrame(rep_rows)
     reps["manager_id"] = reps.groupby("territory_id")["rep_id"].transform("first")
 
+    # --- attrition and backfills: real field teams lose people and replace them --
+    # Exits are drawn inside the reporting window (~12% a year); each leaver is backfilled
+    # 1-4 months later by a new hire who then has to ramp up. This is what makes
+    # "why are we behind target?" a real question: vacancies and ramping reps cost signings.
+    window_start, window_end = months[0], months[-1] + pd.offsets.MonthEnd(0)
+    base = reps["hire_date"].where(reps["hire_date"] > window_start, window_start)
+    exit_after = rng.exponential(scale=8 * 365, size=len(reps)).astype(int)
+    term = base + pd.to_timedelta(exit_after, unit="D")
+    reps["termination_date"] = term.where(term <= window_end)
+    backfills = []
+    for r in reps[reps["termination_date"].notna()].itertuples():
+        hire = (r.termination_date + pd.Timedelta(days=int(rng.integers(30, 120)))).normalize()
+        if hire > window_end:
+            continue  # vacancy still open at the end of the window
+        backfills.append({
+            "rep_id": f"R{rid:04d}", "rep_name": f"{rng.choice(FIRST)} {rng.choice(LAST)}",
+            "territory_id": r.territory_id, "role": r.role, "hire_date": hire,
+            "skill": float(np.clip(rng.lognormal(0, 0.2), 0.55, 1.8)), "manager_id": r.manager_id,
+            "termination_date": pd.NaT,
+        })
+        rid += 1
+    if backfills:
+        reps = pd.concat([reps, pd.DataFrame(backfills)], ignore_index=True)
+
     # --- signings (one row = one merchant signed) -----------------------------
     rt = reps.merge(territories, on="territory_id").merge(markets, on="market_id")
     grid = rt.assign(key=1).merge(pd.DataFrame({"month": months, "key": 1}), on="key").drop(columns="key")
-    grid = grid[grid["hire_date"] <= grid["month"] + pd.offsets.MonthEnd(0)]
+    grid = grid[(grid["hire_date"] <= grid["month"] + pd.offsets.MonthEnd(0))
+                & (grid["termination_date"].isna() | (grid["termination_date"] >= grid["month"]))]
     tenure = ((grid["month"] - grid["hire_date"]).dt.days / 30.44).clip(lower=0)
     ramp = np.where(tenure < 6, 0.45, np.where(tenure < 12, 0.75, 1.0))
     years = (grid["month"] - months[0]).dt.days / 365.25
@@ -155,7 +180,9 @@ def generate(seed: int | None = None, inject_issues: bool | None = None) -> Data
         "transactions": np.maximum(1, (volume / rng.uniform(35, 140, len(idx))).astype(int)),
     })
 
-    reps_out = reps.drop(columns=["skill"]).assign(hire_date=lambda d: d["hire_date"].dt.date)
+    reps_out = reps.drop(columns=["skill"]).assign(
+        hire_date=lambda d: d["hire_date"].dt.date,
+        termination_date=lambda d: d["termination_date"].dt.date.astype(object).where(d["termination_date"].notna(), None))
     territories_out = territories.drop(columns=["potential_mult"])
     markets_out = markets.drop(columns=["size_mult", "yoy_growth"])
 

@@ -3,7 +3,8 @@
 For each market, three candidate models compete in a rolling-origin back-test.
 The model with the lowest WAPE on held-out months wins that market. Prediction
 intervals come from the winner's own back-test errors (empirical, not assumed normal),
-so the bands show how wrong the model has actually been before.
+so the bands show how wrong the model has actually been before. A model that consistently
+ran high or low in the back-test is bias-corrected by its median error first.
 
 Candidates:
   * seasonal_naive_growth - last year's same month x trailing YoY growth (strong baseline)
@@ -78,10 +79,15 @@ def forecast_market(y: pd.Series, cfg: dict) -> tuple[pd.DataFrame, pd.DataFrame
     score = bt.groupby("model")["wape"].mean().sort_values()
     best = score.index[0]
     ratios = np.concatenate(bt.loc[bt["model"] == best, "ratios"].to_list())
+    # bias correction: if the winner has consistently run high (or low) in the back-test,
+    # scale its forecast by the median actual/forecast ratio, then build the interval from
+    # the remaining spread, so the band is centred on the corrected forecast
+    bias = float(np.clip(np.median(ratios), 0.85, 1.15))
     a = (1 - cfg["interval_level"]) / 2
-    lo_r, hi_r = np.quantile(ratios, [a, 1 - a])
+    lo_r, hi_r = np.quantile(ratios / bias, [a, 1 - a])
+    lo_r, hi_r = min(lo_r, 1.0), max(hi_r, 1.0)
     h = cfg["horizon_months"]
-    point = np.maximum(MODELS[best](y, h), 0)
+    point = np.maximum(MODELS[best](y, h), 0) * bias
     widen = np.sqrt(np.arange(1, h + 1) / cfg["backtest_horizon"]).clip(min=1)  # uncertainty grows with horizon
     idx = pd.date_range(y.index[-1] + pd.offsets.MonthBegin(1), periods=h, freq="MS")
     fc = pd.DataFrame({

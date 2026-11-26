@@ -1,6 +1,7 @@
 -- Auto-generated from src/fph/sql/marts/03_rep_monthly.sql by sqlglot. Target: fph_marts.rep_monthly
 CREATE OR REPLACE TABLE fph_marts.rep_monthly AS
-/* Rep x month performance grain that every scorecard, dashboard and the AI agent reads from. */
+/* Rep x month performance grain (only months the rep was employed) that every scorecard, */
+/* dashboard and the AI agent reads from. */
 /* new_merchant_volume_usd = charge volume in the month from merchants the rep signed in the */
 /* same calendar year (the "new business" a field team is credited for). */
 WITH months AS (
@@ -15,6 +16,9 @@ WITH months AS (
   CROSS JOIN months AS mo
   WHERE
     mo.month >= CAST(TIMESTAMP_TRUNC(d.hire_date, MONTH) AS DATE)
+    AND (
+      d.termination_date IS NULL OR mo.month <= d.termination_date
+    ) /* employed in the month */
 ), sign AS (
   SELECT
     rep_id,
@@ -52,6 +56,7 @@ SELECT
   d.market_id,
   d.market_name,
   d.region,
+  DATE_DIFF(rm.month, d.hire_date, MONTH) AS tenure_months,
   COALESCE(s.signings, 0) AS signings,
   COALESCE(s.mid_large_signings, 0) AS mid_large_signings,
   COALESCE(s.expected_annual_volume_usd, 0) AS expected_annual_volume_usd,

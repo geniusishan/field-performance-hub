@@ -1,4 +1,5 @@
--- Rep x month performance grain that every scorecard, dashboard and the AI agent reads from.
+-- Rep x month performance grain (only months the rep was employed) that every scorecard,
+-- dashboard and the AI agent reads from.
 -- new_merchant_volume_usd = charge volume in the month from merchants the rep signed in the
 -- same calendar year (the "new business" a field team is credited for).
 WITH months AS (
@@ -9,6 +10,7 @@ rep_months AS (
     FROM marts.dim_rep AS d
     CROSS JOIN months AS mo
     WHERE mo.month >= CAST(DATE_TRUNC('month', d.hire_date) AS DATE)
+      AND (d.termination_date IS NULL OR mo.month <= d.termination_date)   -- employed in the month
 ),
 sign AS (
     SELECT
@@ -43,6 +45,7 @@ SELECT
     d.market_id,
     d.market_name,
     d.region,
+    DATE_DIFF('month', d.hire_date, rm.month) AS tenure_months,
     COALESCE(s.signings, 0) AS signings,
     COALESCE(s.mid_large_signings, 0) AS mid_large_signings,
     COALESCE(s.expected_annual_volume_usd, 0) AS expected_annual_volume_usd,
