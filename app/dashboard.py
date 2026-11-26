@@ -35,9 +35,21 @@ def ensure_warehouse() -> bool:
     """On a fresh deploy (e.g. Streamlit Community Cloud) build the data on first load."""
     from fph import pipeline
     from fph.config import warehouse_path
-    if not warehouse_path().exists():
-        pipeline.run(verbose=False)
+    if not warehouse_path().exists() or not _has_table("insights", "gap_drivers"):
+        pipeline.run(verbose=False)   # first launch, or data built by an older version of the app
     return True
+
+
+def _has_table(schema: str, table: str) -> bool:
+    try:
+        con = warehouse.connect(read_only=True)
+    except Exception:  # noqa: BLE001
+        return False
+    try:
+        return bool(con.execute("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = ? AND table_name = ?",
+                                [schema, table]).fetchone()[0])
+    finally:
+        con.close()
 
 
 @st.cache_data(ttl=600)
